@@ -72,6 +72,10 @@ var CastPlayer = function() {
   // @type {DEVICE_STATE} A state for device
   this.deviceState = DEVICE_STATE.IDLE;
 
+  /* receivers available */
+  // @type {boolean} A boolean to indicate availability of receivers
+  this.receivers_available = false;
+
   /* Cast player variables */
   // @type {Object} a chrome.cast.media.Media object
   this.currentMediaSession = null;
@@ -119,7 +123,8 @@ var CastPlayer = function() {
  * Initialize local media player 
  */
 CastPlayer.prototype.initializeLocalPlayer = function() {
-  this.localPlayer = document.getElementById('video_element')
+  this.localPlayer = document.getElementById('video_element');
+  this.localPlayer.addEventListener('loadeddata', this.onMediaLoadedLocally.bind(this));
 };
 
 /**
@@ -136,13 +141,20 @@ CastPlayer.prototype.initializeCastPlayer = function() {
   }
   // default set to the default media receiver app ID
   // optional: you may change it to point to your own
-  var applicationID = chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID;
+  //var applicationID = chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID;
+  var applicationID = '4F8B3483';
+
+  // auto join policy can be one of the following three
+  var autoJoinPolicy = chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED;
+  //var autoJoinPolicy = chrome.cast.AutoJoinPolicy.PAGE_SCOPED;
+  //var autoJoinPolicy = chrome.cast.AutoJoinPolicy.TAB_AND_ORIGIN_SCOPED;
 
   // request session
   var sessionRequest = new chrome.cast.SessionRequest(applicationID);
   var apiConfig = new chrome.cast.ApiConfig(sessionRequest,
     this.sessionListener.bind(this),
-    this.receiverListener.bind(this));
+    this.receiverListener.bind(this),
+    autoJoinPolicy);
 
   chrome.cast.initialize(apiConfig, this.onInitSuccess.bind(this), this.onError.bind(this));
 
@@ -178,11 +190,25 @@ CastPlayer.prototype.sessionListener = function(e) {
     this.deviceState = DEVICE_STATE.ACTIVE;
     if( this.session.media[0] ) {
       this.onMediaDiscovered('activeSession', this.session.media[0]);
+      this.syncCurrentMedia(this.session.media[0].media.contentId);
+      this.selectMediaUpdateUI(this.currentMediaIndex);
+      this.updateDisplayMessage();
     }
     else {
       this.loadMedia(this.currentMediaIndex);
     }
     this.session.addUpdateListener(this.sessionUpdateListener.bind(this));
+  }
+}
+
+/**
+ * @param {string} currentMediaURL
+ */
+CastPlayer.prototype.syncCurrentMedia = function(currentMediaURL) {
+  for(var i=0; i < this.mediaContents.length; i++) {
+    if( currentMediaURL == this.mediaContents[i]['sources'][0] ) {
+      this.currentMediaIndex = i;
+    }
   }
 }
 
@@ -193,6 +219,8 @@ CastPlayer.prototype.sessionListener = function(e) {
  */
 CastPlayer.prototype.receiverListener = function(e) {
   if( e === 'available' ) {
+    this.receivers_available = true;
+    this.updateMediaControlUI();
     console.log("receiver found");
   }
   else {
@@ -212,10 +240,13 @@ CastPlayer.prototype.sessionUpdateListener = function(isAlive) {
     clearInterval(this.timer);
     this.updateDisplayMessage();
 
-    // continue to play media locally
-    console.log("current time: " + this.currentMediaTime);
-    this.playMediaLocally(this.currentMediaTime);
-    this.updateMediaControlUI();
+    var online = navigator.onLine;
+    if( online == true ) {
+      // continue to play media locally
+      console.log("current time: " + this.currentMediaTime);
+      this.playMediaLocally();
+      this.updateMediaControlUI();
+    }
   }
 };
 
@@ -239,14 +270,12 @@ CastPlayer.prototype.selectMedia = function(mediaIndex) {
   pi.style.marginLeft = -21 - PROGRESS_BAR_WIDTH + 'px';
 
   if( !this.currentMediaSession ) {
-    if( this.localPlayerState == PLAYER_STATE.PLAYING ) {
-      this.localPlayerState = PLAYER_STATE.IDLE; 
-      this.playMediaLocally(0); 
-    }
+    this.localPlayerState = PLAYER_STATE.IDLE;
+    this.playMediaLocally();
   }
   else {
-    this.castPlayerState = PLAYER_STATE.IDLE; 
-    this.playMedia(); 
+    this.castPlayerState = PLAYER_STATE.IDLE;
+    this.playMedia();
   }
   this.selectMediaUpdateUI(mediaIndex);
 };
@@ -258,7 +287,9 @@ CastPlayer.prototype.selectMedia = function(mediaIndex) {
  */
 CastPlayer.prototype.launchApp = function() {
   console.log("launching app...");
-  chrome.cast.requestSession(this.onRequestSessionSuccess.bind(this), this.onLaunchError.bind(this));
+  chrome.cast.requestSession(
+    this.sessionListener.bind(this),
+    this.onLaunchError.bind(this));
   if( this.timer ) {
     clearInterval(this.timer);
   }
@@ -307,7 +338,7 @@ CastPlayer.prototype.onStopAppSuccess = function(message) {
 
   // continue to play media locally
   console.log("current time: " + this.currentMediaTime);
-  this.playMediaLocally(this.currentMediaTime);
+  this.playMediaLocally();
   this.updateMediaControlUI();
 };
 
@@ -322,25 +353,24 @@ CastPlayer.prototype.loadMedia = function(mediaIndex) {
   }
   console.log("loading..." + this.mediaContents[mediaIndex]['title']);
   var mediaInfo = new chrome.cast.media.MediaInfo(this.mediaContents[mediaIndex]['sources'][0]);
+
+  mediaInfo.metadata = new chrome.cast.media.GenericMediaMetadata();
+  mediaInfo.metadata.metadataType = chrome.cast.media.MetadataType.GENERIC;
   mediaInfo.contentType = 'video/mp4';
+
+  mediaInfo.metadata.title = this.mediaContents[mediaIndex]['title'];
+  mediaInfo.metadata.images = [{'url': MEDIA_SOURCE_ROOT + this.mediaContents[mediaIndex]['thumb']}];
+
   var request = new chrome.cast.media.LoadRequest(mediaInfo);
   request.autoplay = this.autoplay;
   if( this.localPlayerState == PLAYER_STATE.PLAYING ) {
     request.currentTime = this.localPlayer.currentTime;
+    this.localPlayer.pause();
+    this.localPlayerState = PLAYER_STATE.STOPPED;
   }
   else {
     request.currentTime = 0;
   } 
-  var payload = {
-    "title:" : this.mediaContents[0]['title'],
-    "thumb" : this.mediaContents[0]['thumb']
-  };
-
-  var json = {
-    "payload" : payload
-  };
-
-  request.customData = json;
 
   this.castPlayerState = PLAYER_STATE.LOADING;
   this.session.loadMedia(request,
@@ -458,16 +488,14 @@ CastPlayer.prototype.incrementMediaTime = function() {
 
 /**
  * Play media in local player
- * @param {Number} currentTime A number for media current position 
  */
-CastPlayer.prototype.playMediaLocally = function(currentTime) {
+CastPlayer.prototype.playMediaLocally = function() {
   var vi = document.getElementById('video_image')
   vi.style.display = 'none';
   this.localPlayer.style.display = 'block';
   if( this.localPlayerState != PLAYER_STATE.PLAYING && this.localPlayerState != PLAYER_STATE.PAUSED ) { 
     this.localPlayer.src = this.mediaContents[this.currentMediaIndex]['sources'][0];
     this.localPlayer.load();
-    this.localPlayer.addEventListener('loadeddata', this.onMediaLoadedLocally.bind(this, currentTime));
   }
   else {
     this.localPlayer.play();
@@ -480,9 +508,8 @@ CastPlayer.prototype.playMediaLocally = function(currentTime) {
 
 /**
  * Callback when media is loaded in local player 
- * @param {Number} currentTime A number for media current position 
  */
-CastPlayer.prototype.onMediaLoadedLocally = function(currentTime) {
+CastPlayer.prototype.onMediaLoadedLocally = function() {
   this.currentMediaDuration = this.localPlayer.duration;
   var duration = this.currentMediaDuration;
       
@@ -502,7 +529,8 @@ CastPlayer.prototype.onMediaLoadedLocally = function(currentTime) {
     }
   }
   document.getElementById("duration").innerHTML = duration;
-  this.localPlayer.currentTime= currentTime;
+  this.localPlayer.currentTime = this.currentMediaTime;
+
   this.localPlayer.play();
   // start progress timer
   this.startProgressTimer(this.incrementMediaTime);
@@ -513,7 +541,7 @@ CastPlayer.prototype.onMediaLoadedLocally = function(currentTime) {
  */
 CastPlayer.prototype.playMedia = function() {
   if( !this.currentMediaSession ) {
-    this.playMediaLocally(0);
+    this.playMediaLocally();
     return;
   }
 
@@ -574,7 +602,7 @@ CastPlayer.prototype.pauseMediaLocally = function() {
 };
 
 /**
- * Stop meia playback in either Cast or local mode  
+ * Stop media playback in either Cast or local mode  
  */
 CastPlayer.prototype.stopMedia = function() {
   if( !this.currentMediaSession ) {
@@ -756,18 +784,17 @@ CastPlayer.prototype.mediaCommandSuccessCallback = function(info, e) {
 CastPlayer.prototype.updateProgressBar = function(e) {
   var p = document.getElementById("progress"); 
   var pi = document.getElementById("progress_indicator"); 
-  if( e.idleReason == 'FINISHED' && e.playerState == 'IDLE' ) {
+  if( e == false ) {
     p.style.width = '0px';
     pi.style.marginLeft = -21 - PROGRESS_BAR_WIDTH + 'px';
     clearInterval(this.timer);
     this.castPlayerState = PLAYER_STATE.STOPPED;
     this.updateDisplayMessage();
-  }
-  else {
-    p.style.width = Math.ceil(PROGRESS_BAR_WIDTH * e.currentTime / this.currentMediaSession.media.duration + 1) + 'px';
+  } else {
+    p.style.width = Math.ceil(PROGRESS_BAR_WIDTH * this.currentMediaSession.currentTime / this.currentMediaSession.media.duration + 1) + 'px';
     this.progressFlag = false; 
     setTimeout(this.setProgressFlag.bind(this),1000); // don't update progress in 1 second
-    var pp = Math.ceil(PROGRESS_BAR_WIDTH * e.currentTime / this.currentMediaSession.media.duration);
+    var pp = Math.ceil(PROGRESS_BAR_WIDTH * this.currentMediaSession.currentTime / this.currentMediaSession.media.duration);
     pi.style.marginLeft = -21 - PROGRESS_BAR_WIDTH + pp + 'px';
   }
 };
@@ -817,15 +844,14 @@ CastPlayer.prototype.updateDisplayMessage = function() {
     document.getElementById("playerstatebg").style.display = 'none';
     document.getElementById("play").style.display = 'block';
     document.getElementById("video_image_overlay").style.display = 'none';
-    //document.getElementById("media_control").style.opacity = 0.0;
   }
   else {
     document.getElementById("playerstate").style.display = 'block';
     document.getElementById("playerstatebg").style.display = 'block';
     document.getElementById("video_image_overlay").style.display = 'block';
-    //document.getElementById("media_control").style.opacity = 0.5;
-    document.getElementById("playerstate").innerHTML = this.castPlayerState
-      + " on " + this.session.receiver.friendlyName;
+    document.getElementById("playerstate").innerHTML = 
+      this.mediaContents[this.currentMediaIndex]['title'] + " "
+      + this.castPlayerState + " on " + this.session.receiver.friendlyName;
   }
 }
 
@@ -833,18 +859,8 @@ CastPlayer.prototype.updateDisplayMessage = function() {
  * Update media control UI components based on localPlayerState or castPlayerState
  */
 CastPlayer.prototype.updateMediaControlUI = function() {
-  if( this.deviceState == DEVICE_STATE.ACTIVE ) {
-    document.getElementById("casticonactive").style.display = 'block';
-    document.getElementById("casticonidle").style.display = 'none';
-    var playerState = this.castPlayerState;
-  }
-  else {
-    document.getElementById("casticonidle").style.display = 'block';
-    document.getElementById("casticonactive").style.display = 'none';
-    var playerState = this.localPlayerState;
-  }
-
-  switch( playerState ) 
+  var playerState = this.deviceState == DEVICE_STATE.ACTIVE ? this.castPlayerState : this.localPlayerState;
+  switch ( playerState )
   {
     case PLAYER_STATE.LOADED:
     case PLAYER_STATE.PLAYING:
@@ -860,6 +876,23 @@ CastPlayer.prototype.updateMediaControlUI = function() {
       break;
     default:
       break;
+  }
+
+  if( !this.receivers_available ) {
+    document.getElementById("casticonactive").style.display = 'none';
+    document.getElementById("casticonidle").style.display = 'none';
+    return;
+  }
+
+  if( this.deviceState == DEVICE_STATE.ACTIVE ) {
+    document.getElementById("casticonactive").style.display = 'block';
+    document.getElementById("casticonidle").style.display = 'none';
+    this.hideFullscreenButton();
+  }
+  else {
+    document.getElementById("casticonidle").style.display = 'block';
+    document.getElementById("casticonactive").style.display = 'none';
+    this.showFullscreenButton();
   }
 }
 
@@ -939,7 +972,7 @@ CastPlayer.prototype.showVolumeSlider = function() {
 };    
 
 /**
- * Hide the volume stlider 
+ * Hide the volume slider 
  */
 CastPlayer.prototype.hideVolumeSlider = function() {
   document.getElementById('audio_bg').style.opacity = 0;
@@ -959,7 +992,7 @@ CastPlayer.prototype.requestFullScreen = function() {
   if (requestMethod) { // Native full screen.
     requestMethod.call(element);
     console.log("requested fullscreen");
-  } 
+  }
 };
 
 /**
@@ -977,21 +1010,40 @@ CastPlayer.prototype.cancelFullScreen = function() {
 /**
  * Exit fullscreen mode by escape 
  */
-CastPlayer.prototype.changeHandler = function(){                                           
-  if (this.fullscreen) { 
-    document.getElementById('fullscreen_expand').style.display = 'block';
-    document.getElementById('fullscreen_collapse').style.display = 'none';
-    this.fullscreen = false;
+CastPlayer.prototype.changeHandler = function(){
+  this.fullscreen = !this.fullscreen;
+  if (this.deviceState == DEVICE_STATE.ACTIVE) {
+    this.hideFullscreenButton();
   }
   else {
-    document.getElementById('fullscreen_expand').style.display = 'none';
-    document.getElementById('fullscreen_collapse').style.display = 'block';
-    this.fullscreen = true;
+    this.showFullscreenButton();
   }
-};    
+};
 
 /**
- * @param {function} A callback function for the fucntion to start timer 
+ * Show expand/collapse fullscreen button
+ */
+CastPlayer.prototype.showFullscreenButton = function(){
+  if (this.fullscreen) {
+    document.getElementById('fullscreen_expand').style.display = 'none';
+    document.getElementById('fullscreen_collapse').style.display = 'block';
+  }
+  else {
+    document.getElementById('fullscreen_expand').style.display = 'block';
+    document.getElementById('fullscreen_collapse').style.display = 'none';
+  }
+};
+
+/**
+ * Hide expand/collapse fullscreen button
+ */
+CastPlayer.prototype.hideFullscreenButton = function(){
+  document.getElementById('fullscreen_expand').style.display = 'none';
+  document.getElementById('fullscreen_collapse').style.display = 'none';
+};
+
+/**
+ * @param {function} A callback function for the function to start timer 
  */
 CastPlayer.prototype.startProgressTimer = function(callback) {
   if( this.timer ) {
@@ -1088,7 +1140,7 @@ var mediaJSON = { "categories" : [ { "name" : "Movies",
               "thumb" : "images/ForBiggerBlazes.jpg",
               "title" : "For Bigger Blazes"
             },
-            { "description" : "Introducing Chromecast. The easiest way to enjoy online video and music on your TV—for when Batman's escapes aren't quite big enough. For $35. Learn how to use Chromecast with Google Play Movies and more at google.com/chromecast.",
+            { "description" : "Introducing Chromecast. The easiest way to enjoy online video and music on your TV. For when Batman's escapes aren't quite big enough. For $35. Learn how to use Chromecast with Google Play Movies and more at google.com/chromecast.",
               "sources" : [ "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4" ],
               "subtitle" : "By Google",
               "thumb" : "images/ForBiggerEscapes.jpg",
@@ -1100,13 +1152,13 @@ var mediaJSON = { "categories" : [ { "name" : "Movies",
               "thumb" : "images/ForBiggerFun.jpg",
               "title" : "For Bigger Fun"
             },
-            { "description" : "Introducing Chromecast. The easiest way to enjoy online video and music on your TV—for the times that call for bigger joyrides. For $35. Learn how to use Chromecast with YouTube and more at google.com/chromecast.",
+            { "description" : "Introducing Chromecast. The easiest way to enjoy online video and music on your TV. For the times that call for bigger joyrides. For $35. Learn how to use Chromecast with YouTube and more at google.com/chromecast.",
               "sources" : [ "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4" ],
               "subtitle" : "By Google",
               "thumb" : "images/ForBiggerJoyrides.jpg",
               "title" : "For Bigger Joyrides"
             },
-            { "description" :"Introducing Chromecast. The easiest way to enjoy online video and music on your TV—for when you want to make Buster's big meltdowns even bigger. For $35. Learn how to use Chromecast with Netflix and more at google.com/chromecast.", 
+            { "description" :"Introducing Chromecast. The easiest way to enjoy online video and music on your TV. For when you want to make Buster's big meltdowns even bigger. For $35. Learn how to use Chromecast with Netflix and more at google.com/chromecast.", 
               "sources" : [ "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerMeltdowns.mp4" ],
               "subtitle" : "By Google",
               "thumb" : "images/ForBiggerMeltdowns.jpg",
@@ -1119,6 +1171,7 @@ var mediaJSON = { "categories" : [ { "name" : "Movies",
               "title" : "Sintel"
             },
 			{ "description" : "Smoking Tire takes the all-new Subaru Outback to the highest point we can find in hopes our customer-appreciation Balloon Launch will get some free T-shirts into the hands of our viewers.",
+              "sources" : [ "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/SubaruOutbackOnStreetAndDirt.mp4" ],
               "subtitle" : "By Garage419",
               "thumb" : "images/SubaruOutbackOnStreetAndDirt.jpg",
               "title" : "Subaru Outback On Street And Dirt"
@@ -1141,7 +1194,7 @@ var mediaJSON = { "categories" : [ { "name" : "Movies",
               "thumb" : "images/WeAreGoingOnBullrun.jpg",
               "title" : "We Are Going On Bullrun"
             },
-			{ "description" : "The Smoking Tire meets up with Chris and Jorge from CarsForAGrand.com to see just how far $1,000 can go when looking for a car.The Smoking Tire meets up with Chris and Jorge from CarsForAGrand.com to see just how far $1,000 can go when looking for a car.",
+			{ "description" : "The Smoking Tire meets up with Chris and Jorge from CarsForAGrand.com to see just how far $1,000 can go when looking for a car. The Smoking Tire meets up with Chris and Jorge from CarsForAGrand.com to see just how far $1,000 can go when looking for a car.",
               "sources" : [ "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/WhatCarCanYouGetForAGrand.mp4" ],
               "subtitle" : "By Garage419",
               "thumb" : "images/WhatCarCanYouGetForAGrand.jpg",
